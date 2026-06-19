@@ -1,196 +1,215 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Juego de la Vida SHIREL | Premium Tablero</title>
-    <!-- Incluimos Socket.io -->
-    <script src="/socket.io/socket.io.js"></script>
-    
-    <style>
-        /* RESET BÁSICO */
-        * { margin: 0; padding: 0; box-sizing: border-box; outline: none; }
-        
-        /* FUENTE ELEGANTE (Cargamos de Google Fonts) */
-        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=Poppins:wght@300;400;600&display=swap');
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  onSnapshot,
+  updateDoc,
+  collection,
+  addDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged 
+} from 'firebase/auth';
 
-        body {
-            /* FONTO DE MÁRMOL OSCURO PULIDO (Cargado directamente por URL) */
-            background-color: #03060a;
-            background-image: url('https://i.ibb.co/6y4GZtJ/shirel-premium-marble-bg.jpg');
-            background-size: cover;
-            background-attachment: fixed;
-            background-position: center;
-            color: #f0f0f0;
-            font-family: 'Poppins', sans-serif;
-            text-align: center;
-            padding: 20px;
-            overflow-x: hidden; /* Evita scroll horizontal */
+// --- CONFIGURACIÓN DE AUDIO SINTETIZADO (Web Audio API) ---
+class SoundManager {
+  constructor() {
+    this.ctx = null;
+  }
+  init() {
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+  }
+  playCoin() {
+    this.init();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(587.33, now); // D5
+    osc.frequency.setValueAtTime(880, now + 0.1); // A5
+    osc.frequency.setValueAtTime(1174.66, now + 0.2); // D6
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.4);
+  }
+  playTick() {
+    this.init();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.exponentialRampToValueAtTime(900, now + 0.05);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.06);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.06);
+  }
+  playWin() {
+    this.init();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.50, 1318.51]; // C5, E5, G5, C6, E6
+    notes.forEach((freq, idx) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+      gain.gain.setValueAtTime(0.08, now + idx * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.08 + 0.4);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now + idx * 0.08);
+      osc.stop(now + idx * 0.08 + 0.4);
+    });
+  }
+  playLose() {
+    this.init();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(280, now);
+    osc.frequency.linearRampToValueAtTime(80, now + 0.5);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.5);
+  }
+  playMatch() {
+    this.init();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(440, now);
+    osc.frequency.linearRampToValueAtTime(880, now + 0.35);
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.35);
+  }
+}
+
+const sound = new SoundManager();
+
+// --- CONFIGURACIÓN DE FIRESTORE (REGLA 1) ---
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'shirel-juego-vida-v2';
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const BOT_OPONENTS = [
+  { name: "Gonzalo_VIP", avatar: "👑", badge: "High Roller", winRate: "65%" },
+  { name: "Micaela_Shirel", avatar: "💎", badge: "Leyenda", winRate: "59%" },
+  { name: "Nico_Efectivo", avatar: "💵", badge: "Tiburón", winRate: "54%" },
+  { name: "Sofi_Suerte", avatar: "🍀", badge: "Suertuda", winRate: "58%" },
+  { name: "Rey_Del_Tablero", avatar: "🏆", badge: "Invicto", winRate: "70%" },
+  { name: "Plata_O_Miedo", avatar: "🔥", badge: "Súper VIP", winRate: "72%" },
+];
+
+const GAME_TYPES = [
+  { name: "Dados de Oro", icon: "🎲", desc: "Suma de dos dados más alta gana el pozo." },
+  { name: "Carta Imperial", icon: "🃏", desc: "Elige una carta, la de mayor rango se lo lleva." },
+  { name: "Ruleta Shirel", icon: "🎡", desc: "Gira la ruleta de color. ¡Acierta y gana!" },
+  { name: "Moneda de la Suerte", icon: "🪙", desc: "Cara o ceca clásico, velocidad máxima." }
+];
+
+export default function App() {
+  // --- ESTADOS DE USUARIO & AUTENTICACIÓN ---
+  const [user, setUser] = useState(null);
+  const [balance, setBalance] = useState(0);
+  const [globalJackpot, setGlobalJackpot] = useState(1000000); // El gran millón de Shirel
+  const [trafficFactor, setTrafficFactor] = useState(0.8);
+  const [cells, setCells] = useState([]);
+  const [selectedCell, setSelectedCell] = useState(null);
+
+  // --- ESTADO DE CAJA SHIREL (OPERADOR) ---
+  const [shirelCommissionBox, setShirelCommissionBox] = useState(0);
+  const [adminMode, setAdminMode] = useState(false);
+
+  // --- MODALES FINANCIEROS REALES ---
+  const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [depositAmount, setDepositAmount] = useState(25000);
+  const [depositMethod, setDepositMethod] = useState('MercadoPago');
+  const [withdrawAmount, setWithdrawAmount] = useState(10000);
+  const [withdrawAlias, setWithdrawAlias] = useState('');
+  const [adminWithdrawAmount, setAdminWithdrawAmount] = useState(0);
+  const [adminWithdrawCBU, setAdminWithdrawCBU] = useState('');
+
+  // Modales generales y rueda diaria
+  const [showDailyWheel, setShowDailyWheel] = useState(false);
+  const [dailySpinUsed, setDailySpinUsed] = useState(false);
+  const [customAlert, setCustomAlert] = useState(null);
+  const [liveFeed, setLiveFeed] = useState([
+    { id: 1, text: "🔥 ¡La mesa del Casillero 77 está al rojo vivo! Comisión rebajada al 5.1%" },
+    { id: 2, text: "💰 Gonzalo_VIP acaba de ganar $420,000 en el Casillero 99!" }
+  ]);
+
+  // --- ESTADOS DE LA PARTIDA ---
+  const [gameModalOpen, setGameModalOpen] = useState(false);
+  const [betAmount, setBetAmount] = useState(5000);
+  const [gameState, setGameState] = useState('lobby'); // 'lobby', 'matching', 'playing', 'result'
+  const [opponent, setOpponent] = useState(null);
+  const [matchProgress, setMatchProgress] = useState(0);
+  const [miniGameData, setMiniGameData] = useState({});
+  const [commissionRate, setCommissionRate] = useState(7.5);
+  const [gameSelection, setGameSelection] = useState(GAME_TYPES[0]);
+
+  // --- COMPORTAMIENTO FANTASÍA: CONFETI/DESTELLOS AL GANAR ---
+  const [triggerConfetti, setTriggerConfetti] = useState(false);
+
+  // --- EFECTO 1: AUTENTICACIÓN ANÓNIMA O CON TOKEN (REGLA 3) ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
         }
+      } catch (err) {
+        console.error("Error al autenticar:", err);
+      }
+    };
+    initAuth();
 
-        /* SUPERPOSICIÓN OSCURA PARA QUE SE LEA BIEN EL TEXTO */
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.75); /* Oscurece el mármol */
-            z-index: -1;
-        }
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
 
-        /* CONTENEDOR PRINCIPAL */
-        .app-container {
-            max-width: 900px;
-            margin: 0 auto;
-            position: relative;
-            z-index: 1; /* Encima del fondo */
-        }
+  // --- EFECTO 2: SINCRONIZACIÓN FIRESTORE (REGLA 1 Y 2) ---
+  useEffect(() => {
+    if (!user) return;
 
-        /* TÍTULO PRINCIPAL (Estilo Dorado "Cinzel") */
-        h1.gold-title {
-            font-family: 'Cinzel', serif;
-            color: #f7e0a8;
-            font-size: 3rem;
-            text-transform: uppercase;
-            letter-spacing: 3px;
-            margin-bottom: 5px;
-            /* Efecto de luz dorada */
-            text-shadow: 0 0 10px rgba(247, 224, 168, 0.6), 0 0 20px rgba(247, 224, 168, 0.4);
-            animation: pulse-gold 2s infinite alternate;
-        }
-
-        h1.gold-title span { display: block; font-size: 1.2rem; }
-
-        @keyframes pulse-gold {
-            0% { text-shadow: 0 0 10px rgba(247, 224, 168, 0.6); }
-            100% { text-shadow: 0 0 15px rgba(247, 224, 168, 0.8), 0 0 25px rgba(247, 224, 168, 0.5); }
-        }
-
-        .subtitle {
-            font-size: 1.1rem;
-            color: #cccccc;
-            font-weight: 300;
-            margin-bottom: 40px;
-            letter-spacing: 1px;
-        }
-
-        /* EL TABLERO (Grid) */
-        .tablero {
-            display: grid;
-            /* 10 columnas en PC, 5 o 4 en móvil */
-            grid-template-columns: repeat(10, 1fr);
-            gap: 10px;
-            margin: 20px auto;
-            padding: 10px;
-        }
-
-        /* EL CASILLERO (Estilo Botón de Cristal) */
-        .casilla {
-            /* GRADIENTE PARA EFECTO DE CRISTAL OSCURO */
-            background: linear-gradient(135deg, rgba(20, 30, 50, 0.8) 0%, rgba(10, 15, 25, 0.9) 100%);
-            border: 1px solid rgba(0, 229, 255, 0.3); /* Borde Cian muy suave */
-            padding: 18px 0; /* Espaciado interno */
-            border-radius: 8px; /* Bordes suaves */
-            cursor: pointer;
-            position: relative;
-            overflow: hidden; /* Para el brillo */
-            transition: all 0.3s ease-in-out;
-            
-            /* Tipografía del número */
-            font-family: 'Poppins', sans-serif;
-            font-weight: 600;
-            font-size: 1.3rem;
-            color: rgba(255, 255, 255, 0.85); /* Blanco suave */
-            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
-            
-            /* Sombra interna para profundidad */
-            box-shadow: inset 0 0 15px rgba(0,0,0,0.5);
-        }
-
-        /* EFECTO HOVER (Al pasar el mouse) */
-        .casilla:hover {
-            /* Brillo Cian neón suave pero premium */
-            border: 1px solid rgba(0, 229, 255, 0.8);
-            color: #00e5ff;
-            background: linear-gradient(135deg, rgba(30, 45, 75, 0.9) 0%, rgba(15, 20, 35, 1) 100%);
-            box-shadow: 0 0 15px rgba(0, 229, 255, 0.5), inset 0 0 10px rgba(0,0,0,0.4);
-            transform: translateY(-2px); /* Pequeña elevación */
-        }
-
-        /* EFECTO DE BRILLO DE LUZ "GLARE" (El destello de la foto) */
-        .casilla::after {
-            content: '';
-            position: absolute;
-            top: -50%; left: -50%; width: 200%; height: 200%;
-            /* Degradado radial blanco/transparente */
-            background: radial-gradient(circle at center, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0) 60%);
-            opacity: 0;
-            transition: opacity 0.3s;
-            pointer-events: none; /* No interfiere en los clics */
-        }
-        
-        .casilla:hover::after {
-            opacity: 1; /* Muestra el destello al pasar el mouse */
-        }
-
-        /* RESPONSIVE (Ajustes para celulares) */
-        @media (max-width: 768px) {
-            .tablero { grid-template-columns: repeat(5, 1fr); gap: 8px; } /* 5 columnas en celular */
-            h1.gold-title { font-size: 2.2rem; }
-            .casilla { padding: 15px 0; font-size: 1.1rem; }
-        }
-
-        @media (max-width: 480px) {
-            .tablero { grid-template-columns: repeat(4, 1fr); gap: 6px; } /* 4 columnas en celular muy pequeño */
-        }
-    </style>
-</head>
-<body>
-
-    <div class="app-container">
-        <!-- Título con estilo premium -->
-        <h1 class="gold-title">
-            Juego de la Vida
-            <span>SHIREL - Tablero VIP</span>
-        </h1>
-        <p class="subtitle">Selecciona un casillero premium y asegura tu participación</p>
-
-        <!-- Contenedor del Tablero -->
-        <div class="tablero" id="tablero"></div>
-    </div>
-
-    <script>
-        // Conexión Socket.io (Se conecta automáticamente)
-        const socket = io();
-
-        // Generación del tablero (Se mantiene igual, solo cambia el estilo visual)
-        const tablero = document.getElementById('tablero');
-
-        for (let i = 0; i <= 99; i++) {
-            const div = document.createElement('div');
-            div.className = 'casilla';
-            div.innerText = i; // Solo el número, sin texto extra
-            
-            // Evento al hacer clic
-            div.onclick = () => {
-                const monto = prompt('Ingresa el monto de tu apuesta para el casillero ' + i + ':', '1000');
-                if (monto && !isNaN(monto) && monto > 0) {
-                    socket.emit('apuesta', { casillero: i, monto: parseFloat(monto) });
-                    alert('Apuesta de $' + monto + ' enviada para el casillero ' + i + '.');
-                }
-            };
-
-            tablero.appendChild(div);
-        }
-
-        // Eventos de red (Escuchamos por las apuestas de otros)
-        socket.on('montoActualizado', (data) => {
-            console.log("Apuesta confirmada en casillero:", data);
-        });
-
-        socket.on('error', (msg) => {
-            alert("Error: " + msg);
-        });
-    </script>
-</body>
-    </html>
-    
+    // Sincronizar Balance del Jugador (Ruta Privada - Regla 1)
+    const userDocRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'financials');
+    const unsubUser = onSnapshot(userDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setBalance(data
